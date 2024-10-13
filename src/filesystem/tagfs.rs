@@ -1,6 +1,7 @@
 use std::{
+    collections::HashSet,
     ffi::OsString,
-    path::Path,
+    path::{Component, Path, PathBuf},
     time::{Duration, SystemTime},
 };
 
@@ -68,11 +69,34 @@ impl ToFileAttr for libc::stat {
         }
     }
 }
-pub struct TagFS {}
 
-impl TagFS {
+#[derive(Debug)]
+struct Entry {
+    source: PathBuf,
+}
+
+#[derive(Debug)]
+pub struct TagFS {
+    files: Vec<Entry>,
+    tags: HashSet<OsString>,
+}
+
+impl<'a> TagFS {
     pub fn new() -> Self {
-        Self {}
+        Self {
+            files: Vec::new(),
+            tags: HashSet::new()
+        }
+    }
+
+    pub fn add_file(&mut self, source: &'a Path, tags: HashSet<OsString>) {
+        info!(file = ?source, ?tags, "add_file");
+        self.files.push(Entry {
+            source: source.to_path_buf(),
+        });
+        for tag in tags {
+            self.tags.insert(tag);
+        }
     }
 }
 
@@ -90,13 +114,19 @@ impl FilesystemMT for TagFS {
                 Ok(stat) => Ok((TTL, stat.to_file_attr())),
                 Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
             }
-        } else if path
-            .components()
-            .all(|c| c == std::path::Component::RootDir)
-        {
-            info!(path = debug(path), "TODO: lookup");
+        } else if path.components().all(|c| match c {
+            Component::Prefix(prefix_component) => todo!(),
+            Component::RootDir => true,
+            Component::CurDir => false,
+            Component::ParentDir => false,
+            Component::Normal(tag) => self.tags.contains(tag),
+        }) {
+            debug!(?path, "tag dir");
             Ok((TTL, fh.to_file_attr()))
         } else {
+            for component in path.components() {
+                info!(?path, ?component);
+            }
             info!(path = debug(path), "TODO: lookup");
             Err(ENOENT)
         }
@@ -107,10 +137,13 @@ impl FilesystemMT for TagFS {
             flags = format!("{:#o}", flags),
             "opendir"
         );
-        if path
-            .components()
-            .all(|c| c == std::path::Component::RootDir)
-        {
+        if path.components().all(|c| match c {
+            Component::Prefix(prefix_component) => todo!(),
+            Component::RootDir => true,
+            Component::CurDir => false,
+            Component::ParentDir => false,
+            Component::Normal(tag) => self.tags.contains(tag),
+        }) {
             Ok((0, 0))
         } else {
             info!(path = debug(path), "TODO: lookup");
@@ -120,24 +153,35 @@ impl FilesystemMT for TagFS {
 
     fn readdir(&self, _req: RequestInfo, path: &Path, fh: u64) -> ResultReaddir {
         info!(path = debug(path), fh = debug(fh), "readdir");
-        let entries = vec![
-            DirectoryEntry {
-                name: ".".into(),
-                kind: FileType::Directory,
-            },
-            DirectoryEntry {
-                name: "..".into(),
-                kind: FileType::Directory,
-            },
-            DirectoryEntry {
-                name: "test".into(),
-                kind: FileType::Directory,
-            },
-            DirectoryEntry {
-                name: "hi".into(),
-                kind: FileType::RegularFile,
-            },
-        ];
+        let tags = path.components().filter_map(|c| match c {
+            Component::Normal(p) => Some(p.to_os_string()),
+            _ => None,
+        }).collect::<HashSet<_>>();
+        info!(?tags, ?path, "lookup");
+        let mut entries = vec![
+                DirectoryEntry {
+                    name: ".".into(),
+                    kind: FileType::Directory,
+                },
+                DirectoryEntry {
+                    name: "..".into(),
+                    kind: FileType::Directory,
+                },
+            ];
+            for e in &self.files {
+                let name = e.source.file_name().unwrap().into();
+                info!(?name, ?path, "readdir");
+                entries.push(DirectoryEntry {
+                    name,
+                    kind: FileType::RegularFile,
+                });
+            }
+            for tag in &self.tags {
+                if !tags.contains(tag) {
+                entries.push(DirectoryEntry { name: tag.into(), kind: FileType::Directory });
+                }
+            }
+            
         Ok(entries)
     }
 }

@@ -1,13 +1,17 @@
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use filesystem::TagFS;
+use std::{collections::HashSet, ffi::OsString};
+use std::env;
 use std::ffi::OsStr;
+use std::path::Path;
 use std::str::FromStr;
-use std::{env, os::unix::fs::MetadataExt};
-use tracing::{debug, error, info, Level};
+use tagger::{MetadataTagger, MimeTagger, Tagger};
+use tracing::{debug, info, Level};
 use tracing_subscriber::fmt::format::FmtSpan;
 
 mod filesystem;
+mod tagger;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -41,16 +45,38 @@ fn setup_logger() {
         .with_ansi(false)
         .init();
 }
+
+#[derive(Debug)]
+struct FileUpdater {
+    taggers: Vec<Box<dyn Tagger>>,
+}
+impl FileUpdater {
+    fn new() -> Self {
+        Self {
+            taggers: Vec::new(),
+        }
+    }
+
+    fn add_tagger(&mut self, tagger: impl Tagger + 'static) {
+        self.taggers.push(Box::new(tagger));
+    }
+
+    fn tag(&self, path: &Path) -> HashSet<OsString> {
+        self.taggers.iter().fold(HashSet::new(), |mut acc, tagger| {
+            acc.extend(tagger.tag(path));
+            acc
+        })
+    }
+}
+
 fn main() -> Result<()> {
     setup_logger();
     let args = Args::parse();
 
-    let cookie = magic::Cookie::open(magic::cookie::Flags::ERROR | magic::cookie::Flags::MIME_TYPE)
-        .context("open libmagic database")?;
-    let cookie = match cookie.load(&Default::default()) {
-        Ok(v) => Ok(v),
-        Err(e) => Err(anyhow::Error::msg(format!("load libmagic database: {e}"))),
-    }?;
+    let mut target_fs = TagFS::new();
+    let mut file_updater = FileUpdater::new();
+    file_updater.add_tagger(MimeTagger::new());
+    file_updater.add_tagger(MetadataTagger::new());
 
     for e in walkdir::WalkDir::new(args.source)
         .same_file_system(true)
@@ -59,14 +85,12 @@ fn main() -> Result<()> {
     {
         debug!(entry = debug(&e), "walkdir");
         if e.file_type().is_file() {
-            let metadata = e.metadata().unwrap();
-            let size = metadata.size();
-            let t = cookie.file(e.path()).ok();
-            info!(filename = ?e.path(), size, ?t, "file");
+            target_fs.add_file(e.path(), file_updater.tag(e.path()));
+            info!(filename = ?e.path(), "file");
         }
     }
 
-    let target_fs = TagFS::new();
+    info!(?target_fs, "scanned");
 
     let fuse_args: Vec<&OsStr> = vec![OsStr::new("-o"), OsStr::new("auto_unmount")];
     fuse_mt::mount(
