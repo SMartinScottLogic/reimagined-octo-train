@@ -1,11 +1,11 @@
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use filesystem::TagFS;
-use std::{collections::HashSet, ffi::OsString};
 use std::env;
 use std::ffi::OsStr;
 use std::path::Path;
 use std::str::FromStr;
+use std::{collections::HashSet, ffi::OsString};
 use tagger::{MetadataTagger, MimeTagger, Tagger};
 use tracing::{debug, info, Level};
 use tracing_subscriber::fmt::format::FmtSpan;

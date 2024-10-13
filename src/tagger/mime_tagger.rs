@@ -26,7 +26,7 @@ impl Tagger for MimeTagger {
         let mut tags = HashSet::new();
         match self.cookie.file(path) {
             Ok(tag) => {
-                tags.insert(format!("mime={}",tag.replace('/', "|")).into());
+                tags.insert(format!("mime={}", tag.replace('/', "|")).into());
             }
             Err(e) => error!(error = ?e, "get mime type"),
         };

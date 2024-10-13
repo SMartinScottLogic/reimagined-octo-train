@@ -5,7 +5,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use clap::builder::OsStr;
 use fuse_mt::{
     DirectoryEntry, FileAttr, FileType, FilesystemMT, RequestInfo, ResultOpen, ResultReaddir,
 };
@@ -85,7 +84,7 @@ impl<'a> TagFS {
     pub fn new() -> Self {
         Self {
             files: Vec::new(),
-            tags: HashSet::new()
+            tags: HashSet::new(),
         }
     }
 
@@ -115,7 +114,7 @@ impl FilesystemMT for TagFS {
                 Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
             }
         } else if path.components().all(|c| match c {
-            Component::Prefix(prefix_component) => todo!(),
+            Component::Prefix(_prefix_component) => todo!(),
             Component::RootDir => true,
             Component::CurDir => false,
             Component::ParentDir => false,
@@ -138,7 +137,7 @@ impl FilesystemMT for TagFS {
             "opendir"
         );
         if path.components().all(|c| match c {
-            Component::Prefix(prefix_component) => todo!(),
+            Component::Prefix(_prefix_component) => todo!(),
             Component::RootDir => true,
             Component::CurDir => false,
             Component::ParentDir => false,
@@ -153,35 +152,41 @@ impl FilesystemMT for TagFS {
 
     fn readdir(&self, _req: RequestInfo, path: &Path, fh: u64) -> ResultReaddir {
         info!(path = debug(path), fh = debug(fh), "readdir");
-        let tags = path.components().filter_map(|c| match c {
-            Component::Normal(p) => Some(p.to_os_string()),
-            _ => None,
-        }).collect::<HashSet<_>>();
+        let tags = path
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(p) => Some(p.to_os_string()),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
         info!(?tags, ?path, "lookup");
         let mut entries = vec![
-                DirectoryEntry {
-                    name: ".".into(),
-                    kind: FileType::Directory,
-                },
-                DirectoryEntry {
-                    name: "..".into(),
-                    kind: FileType::Directory,
-                },
-            ];
-            for e in &self.files {
-                let name = e.source.file_name().unwrap().into();
-                info!(?name, ?path, "readdir");
+            DirectoryEntry {
+                name: ".".into(),
+                kind: FileType::Directory,
+            },
+            DirectoryEntry {
+                name: "..".into(),
+                kind: FileType::Directory,
+            },
+        ];
+        for e in &self.files {
+            let name = e.source.file_name().unwrap().into();
+            info!(?name, ?path, "readdir");
+            entries.push(DirectoryEntry {
+                name,
+                kind: FileType::RegularFile,
+            });
+        }
+        for tag in &self.tags {
+            if !tags.contains(tag) {
                 entries.push(DirectoryEntry {
-                    name,
-                    kind: FileType::RegularFile,
+                    name: tag.into(),
+                    kind: FileType::Directory,
                 });
             }
-            for tag in &self.tags {
-                if !tags.contains(tag) {
-                entries.push(DirectoryEntry { name: tag.into(), kind: FileType::Directory });
-                }
-            }
-            
+        }
+
         Ok(entries)
     }
 }
