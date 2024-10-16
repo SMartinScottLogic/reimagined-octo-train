@@ -176,7 +176,10 @@ impl FilesystemMT for TagFS {
 
         for (child_type, child_name) in Self::get_children(path, &self.tags, &self.files) {
             info!(?child_type, name = ?child_name, "children");
-            entries.push(DirectoryEntry{name: child_name.into(), kind: child_type});
+            entries.push(DirectoryEntry {
+                name: child_name.into(),
+                kind: child_type,
+            });
         }
 
         Ok(entries)
@@ -219,10 +222,11 @@ impl TagFS {
             .filter(move |(t, _)| !root_tags.contains(*t))
             .map(|(t, _)| (FileType::Directory, t.as_os_str()))
             .chain(
-                file_ids.into_iter()
-                .filter_map(|file_id| files.get(file_id))
-                .filter_map(|file| file.source.file_name())
-                .map(|file_name| (FileType::RegularFile, file_name))
+                file_ids
+                    .into_iter()
+                    .filter_map(|file_id| files.get(file_id))
+                    .filter_map(|file| file.source.file_name())
+                    .map(|file_name| (FileType::RegularFile, file_name)),
             )
     }
 }
