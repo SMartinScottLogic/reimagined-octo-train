@@ -1,6 +1,6 @@
 use std::{
-    collections::HashSet,
-    ffi::OsString,
+    collections::{HashMap, HashSet},
+    ffi::{OsStr, OsString},
     path::{Component, Path, PathBuf},
     time::{Duration, SystemTime},
 };
@@ -77,14 +77,15 @@ struct Entry {
 #[derive(Debug)]
 pub struct TagFS {
     files: Vec<Entry>,
-    tags: HashSet<OsString>,
+    //tags: HashSet<OsString>,
+    tags: HashMap<OsString, HashSet<usize>>,
 }
 
 impl<'a> TagFS {
     pub fn new() -> Self {
         Self {
             files: Vec::new(),
-            tags: HashSet::new(),
+            tags: HashMap::new(),
         }
     }
 
@@ -93,8 +94,10 @@ impl<'a> TagFS {
         self.files.push(Entry {
             source: source.to_path_buf(),
         });
+        let file_id = self.files.len() - 1;
         for tag in tags {
-            self.tags.insert(tag);
+            self.tags.entry(tag).or_default().insert(file_id);
+            //self.tags.insert(tag);
         }
     }
 }
@@ -118,7 +121,7 @@ impl FilesystemMT for TagFS {
             Component::RootDir => true,
             Component::CurDir => false,
             Component::ParentDir => false,
-            Component::Normal(tag) => self.tags.contains(tag),
+            Component::Normal(tag) => self.tags.contains_key(tag),
         }) {
             debug!(?path, "tag dir");
             Ok((TTL, fh.to_file_attr()))
@@ -141,7 +144,7 @@ impl FilesystemMT for TagFS {
             Component::RootDir => true,
             Component::CurDir => false,
             Component::ParentDir => false,
-            Component::Normal(tag) => self.tags.contains(tag),
+            Component::Normal(tag) => self.tags.contains_key(tag),
         }) {
             Ok((0, 0))
         } else {
@@ -170,23 +173,109 @@ impl FilesystemMT for TagFS {
                 kind: FileType::Directory,
             },
         ];
-        for e in &self.files {
-            let name = e.source.file_name().unwrap().into();
-            info!(?name, ?path, "readdir");
-            entries.push(DirectoryEntry {
-                name,
-                kind: FileType::RegularFile,
-            });
-        }
-        for tag in &self.tags {
-            if !tags.contains(tag) {
-                entries.push(DirectoryEntry {
-                    name: tag.into(),
-                    kind: FileType::Directory,
-                });
-            }
+
+        for (child_type, child_name) in Self::get_children(path, &self.tags, &self.files) {
+            info!(?child_type, name = ?child_name, "children");
+            entries.push(DirectoryEntry{name: child_name.into(), kind: child_type});
         }
 
         Ok(entries)
+    }
+}
+
+impl TagFS {
+    fn get_children<'a, 'b, 'c>(
+        root: &Path,
+        tags: &'a HashMap<OsString, HashSet<usize>>,
+        files: &'b [Entry],
+    ) -> impl Iterator<Item = (FileType, &'c OsStr)>
+    where
+        'a: 'c,
+        'b: 'c,
+    {
+        let root_tags = root
+            .components()
+            .filter_map(|c| match c {
+                Component::Normal(p) => Some(p.to_os_string()),
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        let file_ids = if root_tags.is_empty() {
+            HashSet::new()
+        } else {
+            tags.iter()
+                .filter(|(tag, _file_ids)| root_tags.contains(*tag))
+                .map(|(_tag, file_ids)| file_ids)
+                .fold(None, |acc, v| match acc {
+                    None => Some(v.clone()),
+                    Some(a) => Some(a.intersection(v).cloned().collect()),
+                })
+                .unwrap_or_default()
+        };
+
+        info!(?file_ids, ?root_tags, ?root, "residue");
+
+        tags.iter()
+            .filter(move |(t, _)| !root_tags.contains(*t))
+            .map(|(t, _)| (FileType::Directory, t.as_os_str()))
+            .chain(
+                file_ids.into_iter()
+                .filter_map(|file_id| files.get(file_id))
+                .filter_map(|file| file.source.file_name())
+                .map(|file_name| (FileType::RegularFile, file_name))
+            )
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::{
+        collections::{HashMap, HashSet},
+        ffi::OsString,
+        path::PathBuf,
+    };
+
+    use super::{Entry, TagFS};
+
+    #[test]
+    fn get_children_root() {
+        let mut tags = HashMap::new();
+        tags.insert(OsString::from("tag1"), HashSet::new());
+        tags.insert(OsString::from("tag2"), HashSet::new());
+        tags.insert(OsString::from("tag3"), HashSet::new());
+        let files = vec![Entry {
+            source: PathBuf::from("/fake/dir/where/file/exists/file1.txt"),
+        }];
+
+        let children = TagFS::get_children(&PathBuf::from("/"), &tags, &files);
+        assert_eq!(3, children.count());
+    }
+
+    #[test]
+    fn get_children_tag2() {
+        let mut tags = HashMap::new();
+        tags.insert(OsString::from("tag1"), HashSet::new());
+        tags.insert(OsString::from("tag2"), HashSet::new());
+        tags.insert(OsString::from("tag3"), HashSet::new());
+        let files = vec![Entry {
+            source: PathBuf::from("/fake/dir/where/file/exists/file1.txt"),
+        }];
+
+        let children = TagFS::get_children(&PathBuf::from("/tag2"), &tags, &files);
+        assert_eq!(2, children.count());
+    }
+
+    #[test]
+    fn get_children_tag2_tag1() {
+        let mut tags = HashMap::new();
+        tags.insert(OsString::from("tag1"), HashSet::new());
+        tags.insert(OsString::from("tag2"), HashSet::new());
+        tags.insert(OsString::from("tag3"), HashSet::new());
+        let files = vec![Entry {
+            source: PathBuf::from("/fake/dir/where/file/exists/file1.txt"),
+        }];
+
+        let children = TagFS::get_children(&PathBuf::from("/tag2/tag1"), &tags, &files);
+        assert_eq!(1, children.count());
     }
 }
