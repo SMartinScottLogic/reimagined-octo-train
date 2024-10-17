@@ -4,7 +4,7 @@ use anyhow::Context as _;
 use magic::{cookie::Load, Cookie};
 use tracing::error;
 
-use super::Tagger;
+use super::{Tag, Tagger};
 
 #[derive(Debug)]
 pub struct MimeTagger {
@@ -22,11 +22,11 @@ impl MimeTagger {
     }
 }
 impl Tagger for MimeTagger {
-    fn tag(&self, path: &Path) -> HashSet<OsString> {
+    fn tag(&self, path: &Path) -> HashSet<Tag> {
         let mut tags = HashSet::new();
         match self.cookie.file(path) {
             Ok(tag) => {
-                tags.insert(format!("mime={}", tag.replace('/', "|")).into());
+                tags.insert(Tag::new("mime", tag.replace('/', "|")));
             }
             Err(e) => error!(error = ?e, "get mime type"),
         };
