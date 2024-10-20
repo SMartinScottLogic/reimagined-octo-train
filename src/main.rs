@@ -1,6 +1,7 @@
 use anyhow::{Context as _, Result};
 use clap::Parser;
 use filesystem::TagFS;
+use magic::{cookie::Load, Cookie};
 use std::collections::HashSet;
 use std::env;
 use std::ffi::OsStr;
@@ -78,7 +79,7 @@ fn main() -> Result<()> {
 
     let mut target_fs = TagFS::new();
     let mut file_updater = FileUpdater::new();
-    file_updater.add_tagger(MimeTagger::new());
+    file_updater.add_tagger(MimeTagger::<Cookie<Load>>::new());
     file_updater.add_tagger(MetadataTagger::new());
 
     for e in walkdir::WalkDir::new(args.source)

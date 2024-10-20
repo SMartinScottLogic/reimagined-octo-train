@@ -72,6 +72,7 @@ impl From<&str> for Tag {
         Self::from(value)
     }
 }
+
 pub trait Tagger: Debug {
     fn tag(&self, path: &Path) -> Result<HashSet<Tag>, Error>;
 }
