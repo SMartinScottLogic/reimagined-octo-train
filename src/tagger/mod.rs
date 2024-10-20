@@ -13,10 +13,9 @@ pub use mime_tagger::MimeTagger;
 
 pub(crate) const TAG_SEPARATOR: &str = ":";
 
-#[derive(Debug)]
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum Error {
-    Illegible
+    Illegible,
 }
 
 #[derive(Debug, PartialEq, Eq, Hash)]
@@ -31,7 +30,7 @@ pub struct Tag {
     display: OsString,
 }
 impl Tag {
-    pub(crate) fn new(label: impl Into<OsString>, singleton: bool, value: impl Into<OsString>) -> Self {
+    pub fn new(label: impl Into<OsString>, singleton: bool, value: impl Into<OsString>) -> Self {
         let label: OsString = label.into();
         let value: OsString = value.into();
         let mut display = label.clone();
@@ -43,8 +42,19 @@ impl Tag {
             display,
         }
     }
-    pub(crate) fn as_os_str(&self) -> &OsStr {
+    pub fn as_os_str(&self) -> &OsStr {
         self.display.as_os_str()
+    }
+
+    pub fn is_singleton(&self) -> bool {
+        self.label.as_ref().map(|l| l.singleton).unwrap_or(false)
+    }
+
+    pub fn label(&self) -> &OsStr {
+        match &self.label {
+            Some(l) => &l.label,
+            None => todo!(),
+        }
     }
 }
 impl From<OsString> for Tag {

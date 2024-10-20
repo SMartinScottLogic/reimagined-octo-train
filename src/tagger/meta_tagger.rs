@@ -3,7 +3,7 @@ use std::{collections::HashSet, os::unix::fs::MetadataExt as _, path::Path};
 use time::OffsetDateTime;
 use tracing::error;
 
-use super::{Tag, Tagger, Error};
+use super::{Error, Tag, Tagger};
 
 #[derive(Debug)]
 pub struct MetadataTagger {}
@@ -38,7 +38,7 @@ impl Tagger for MetadataTagger {
             Ok(_) => error!("non-file for metadata"),
             Err(e) => {
                 error!(error = ?e, "get file metadata");
-                return Err(Error::Illegible)
+                return Err(Error::Illegible);
             }
         };
         Ok(tags)
@@ -47,19 +47,27 @@ impl Tagger for MetadataTagger {
 
 #[cfg(test)]
 mod test {
-    use std::{fs, io, path::PathBuf, time::{Duration, SystemTime}};
+    use std::{
+        fs, io,
+        path::PathBuf,
+        time::{Duration, SystemTime},
+    };
 
     use crate::tagger::{Error, Tag, Tagger};
 
     use super::MetadataTagger;
 
     #[test]
-    fn tags() -> io::Result<()>{
+    fn tags() -> io::Result<()> {
         let path = PathBuf::from("test_file");
         let file = fs::File::create_new("test_file")?;
         file.set_len(1234)?;
         // Set modified time to midnight on 01/Jan/1970
-        file.set_modified(SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(24 * 60 * 60)).unwrap())?;
+        file.set_modified(
+            SystemTime::UNIX_EPOCH
+                .checked_add(Duration::from_secs(24 * 60 * 60))
+                .unwrap(),
+        )?;
 
         let tagger = MetadataTagger::new();
         let tags = tagger.tag(&path).unwrap();
