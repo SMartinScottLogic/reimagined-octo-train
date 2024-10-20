@@ -11,23 +11,34 @@ use std::{
 pub use meta_tagger::MetadataTagger;
 pub use mime_tagger::MimeTagger;
 
-const TAG_SEPARATOR: &str = ":";
+pub(crate) const TAG_SEPARATOR: &str = ":";
+
+#[derive(Debug)]
+#[derive(PartialEq)]
+pub enum Error {
+    Illegible
+}
 
 #[derive(Debug, PartialEq, Eq, Hash)]
+pub struct TagLabel {
+    label: OsString,
+    singleton: bool,
+}
+#[derive(Debug, PartialEq, Eq, Hash)]
 pub struct Tag {
-    label: Option<OsString>,
+    label: Option<TagLabel>,
     value: OsString,
     display: OsString,
 }
 impl Tag {
-    pub(crate) fn new(label: impl Into<OsString>, value: impl Into<OsString>) -> Self {
+    pub(crate) fn new(label: impl Into<OsString>, singleton: bool, value: impl Into<OsString>) -> Self {
         let label: OsString = label.into();
         let value: OsString = value.into();
         let mut display = label.clone();
         display.push(TAG_SEPARATOR);
         display.push(&value);
         Self {
-            label: Some(label),
+            label: Some(TagLabel { label, singleton }),
             value,
             display,
         }
@@ -52,7 +63,7 @@ impl From<&str> for Tag {
     }
 }
 pub trait Tagger: Debug {
-    fn tag(&self, path: &Path) -> HashSet<Tag>;
+    fn tag(&self, path: &Path) -> Result<HashSet<Tag>, Error>;
 }
 
 #[cfg(test)]
@@ -71,7 +82,7 @@ mod test {
 
     #[test]
     fn as_os_str() {
-        let tag = Tag::new("label", "value");
+        let tag = Tag::new("label", true, "value");
         let expected: OsString = format!("{}{}{}", "label", TAG_SEPARATOR, "value").into();
         assert_eq!(expected.as_os_str(), tag.as_os_str());
     }

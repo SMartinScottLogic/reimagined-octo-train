@@ -1,10 +1,10 @@
-use std::{collections::HashSet, ffi::OsString, path::Path};
+use std::{collections::HashSet, path::Path};
 
 use anyhow::Context as _;
 use magic::{cookie::Load, Cookie};
 use tracing::error;
 
-use super::{Tag, Tagger};
+use super::{Error, Tag, Tagger};
 
 #[derive(Debug)]
 pub struct MimeTagger {
@@ -22,14 +22,17 @@ impl MimeTagger {
     }
 }
 impl Tagger for MimeTagger {
-    fn tag(&self, path: &Path) -> HashSet<Tag> {
+    fn tag(&self, path: &Path) -> Result<HashSet<Tag>, Error> {
         let mut tags = HashSet::new();
         match self.cookie.file(path) {
             Ok(tag) => {
-                tags.insert(Tag::new("mime", tag.replace('/', "|")));
+                tags.insert(Tag::new("mime", true, tag.replace('/', "|")));
             }
-            Err(e) => error!(error = ?e, "get mime type"),
+            Err(e) => {
+                error!(error = ?e, "get mime type");
+                return Err(Error::Illegible)
+            }
         };
-        tags
+        Ok(tags)
     }
 }

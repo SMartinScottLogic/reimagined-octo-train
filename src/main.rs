@@ -5,7 +5,7 @@ use std::env;
 use std::ffi::OsStr;
 use std::path::Path;
 use std::str::FromStr;
-use std::{collections::HashSet, ffi::OsString};
+use std::collections::HashSet;
 use tagger::{MetadataTagger, MimeTagger, Tag, Tagger};
 use tracing::{debug, info, Level};
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -63,7 +63,10 @@ impl FileUpdater {
 
     fn tag(&self, path: &Path) -> HashSet<Tag> {
         self.taggers.iter().fold(HashSet::new(), |mut acc, tagger| {
-            acc.extend(tagger.tag(path));
+            match tagger.tag(path) {
+                Ok(tags) => acc.extend(tags),
+                Err(_) => todo!(),
+            }
             acc
         })
     }

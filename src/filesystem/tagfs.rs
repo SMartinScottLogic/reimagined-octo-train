@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    ffi::{OsStr, OsString},
+    ffi::OsStr,
     path::{Component, Path, PathBuf},
     time::{Duration, SystemTime},
 };
@@ -8,6 +8,7 @@ use std::{
 use fuse_mt::{
     DirectoryEntry, FileAttr, FileType, FilesystemMT, RequestInfo, ResultOpen, ResultReaddir,
 };
+use itertools::Itertools as _;
 use libc::ENOENT;
 use tracing::{debug, info};
 
@@ -208,6 +209,8 @@ impl TagFS {
                 _ => None,
             })
             .collect::<HashSet<_>>();
+
+        // Collect ids of files with ALL tags in path
         let file_ids = if root_tags.is_empty() {
             HashSet::new()
         } else {
@@ -224,13 +227,22 @@ impl TagFS {
         info!(?file_ids, ?root_tags, ?root, "residue");
 
         tags.iter()
+            // Filter out tags already in path
             .filter(move |(t, _)| !root_tags.contains(t.as_os_str()))
+            // TODO Filter out already seen filter tags
+            .filter(|(t, _)| {
+                info!(?t, "non-matched tag");
+                true
+            })
+            // Remaining tags become directory entries
             .map(|(t, _)| (FileType::Directory, t.as_os_str()))
             .chain(
+                // File ids become Regular File entries
                 file_ids
                     .into_iter()
                     .filter_map(|file_id| files.get(file_id))
                     .filter_map(|file| file.source.file_name())
+                    .unique()
                     .map(|file_name| (FileType::RegularFile, file_name)),
             )
     }
@@ -239,15 +251,16 @@ impl TagFS {
 #[cfg(test)]
 mod test {
     use std::{
-        collections::{HashMap, HashSet},
-        ffi::OsString,
-        path::PathBuf,
+        collections::{HashMap, HashSet}, ffi::OsString, path::PathBuf
     };
 
-    use crate::tagger::Tag;
+    use tracing_test::traced_test;
+
+    use crate::tagger::{Tag, TAG_SEPARATOR};
 
     use super::{Entry, TagFS};
 
+    #[traced_test]
     #[test]
     fn get_children_root() {
         let mut tags = HashMap::new();
@@ -262,6 +275,7 @@ mod test {
         assert_eq!(3, children.count());
     }
 
+    #[traced_test]
     #[test]
     fn get_children_tag2() {
         let mut tags = HashMap::new();
@@ -276,6 +290,7 @@ mod test {
         assert_eq!(2, children.count());
     }
 
+    #[traced_test]
     #[test]
     fn get_children_tag2_tag1() {
         let mut tags = HashMap::new();
@@ -288,5 +303,42 @@ mod test {
 
         let children = TagFS::get_children(&PathBuf::from("/tag2/tag1"), &tags, &files);
         assert_eq!(1, children.count());
+    }
+
+    #[traced_test]
+    #[test]
+    fn get_children_singleton_root() {
+        let mut tags = HashMap::new();
+        tags.insert(Tag::new("singleton", true, "v1"), HashSet::new());
+        tags.insert(Tag::new("singleton", true, "v2"), HashSet::new());
+        tags.insert(Tag::from("tag1"), HashSet::new());
+        let files = vec![Entry {
+            source: PathBuf::from("/fake/dir/where/file/exists/file1.txt"),
+        }];
+
+        let children = TagFS::get_children(&PathBuf::from("/"), &tags, &files).collect::<HashSet<_>>();
+        // Root shows all tags, no files
+        assert_eq!(3, children.len());
+        assert!(children.contains(&(fuse_mt::FileType::Directory, &OsString::from("singleton".to_owned() + TAG_SEPARATOR + "v1"))));
+        assert!(children.contains(&(fuse_mt::FileType::Directory, &OsString::from("singleton".to_owned() + TAG_SEPARATOR + "v2"))));
+        assert!(children.contains(&(fuse_mt::FileType::Directory, &OsString::from("tag1"))));
+    }
+
+    #[traced_test]
+    #[test]
+    fn get_children_singleton_child() {
+        let mut tags = HashMap::new();
+        tags.insert(Tag::new("singleton", true, "v1"), HashSet::new());
+        tags.insert(Tag::new("singleton", true, "v2"), HashSet::new());
+        tags.insert(Tag::from("tag1"), HashSet::new());
+        let files = vec![Entry {
+            source: PathBuf::from("/fake/dir/where/file/exists/file1.txt"),
+        }];
+
+        let children = TagFS::get_children(&PathBuf::from("/singleton".to_owned() + TAG_SEPARATOR + "v1"), &tags, &files).collect::<HashSet<_>>();
+        // Inner shows only non-singleton collisions, and related files
+        assert_eq!(1, children.len());
+        assert!(children.contains(&(fuse_mt::FileType::Directory, &OsString::from("tag1"))));
+
     }
 }
