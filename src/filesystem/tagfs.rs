@@ -10,11 +10,11 @@ use fuse_mt::{
 };
 use itertools::Itertools as _;
 use libc::ENOENT;
-use tracing::{debug, info};
+use tracing::{debug, info, instrument};
 
 use crate::tagger::Tag;
 
-use super::libc_wrappers::mode_to_filetype;
+use super::libc_wrappers::{mode_to_filetype, LibcWrapper, LibcWrapperReal};
 
 const TTL: Duration = Duration::from_secs(1);
 
@@ -82,6 +82,7 @@ pub struct TagFS {
     files: Vec<Entry>,
     //tags: HashSet<OsString>,
     tags: HashMap<Tag, HashSet<usize>>,
+    libc_wrapper: Box<dyn LibcWrapper + Send + Sync>,
 }
 
 impl<'a> TagFS {
@@ -89,6 +90,7 @@ impl<'a> TagFS {
         Self {
             files: Vec::new(),
             tags: HashMap::new(),
+            libc_wrapper: Box::new(LibcWrapperReal::new()),
         }
     }
 
@@ -104,7 +106,11 @@ impl<'a> TagFS {
     }
 
     fn contains_tag(&self, tag: &OsStr) -> bool {
-        self.tags.keys().any(|t| t.as_os_str() == tag)
+        self.get_tag(tag).is_some()
+    }
+
+    fn get_tag(&self, tag: &OsStr) -> Option<(&Tag, &HashSet<usize>)> {
+        self.tags.iter().find(|(t, _file_ids)| t.as_os_str() == tag)
     }
 }
 
@@ -118,27 +124,22 @@ impl FilesystemMT for TagFS {
         info!(path = debug(path), fh = debug(fh), "getattr");
 
         if let Some(fh) = fh {
-            match super::libc_wrappers::fstat(fh) {
+            match self.libc_wrapper.fstat(fh) {
                 Ok(stat) => Ok((TTL, stat.to_file_attr())),
                 Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
             }
-        } else if path.components().all(|c| match c {
-            Component::Prefix(_prefix_component) => todo!(),
-            Component::RootDir => true,
-            Component::CurDir => false,
-            Component::ParentDir => false,
-            Component::Normal(tag) => self.contains_tag(tag),
-        }) {
-            debug!(?path, "tag dir");
-            Ok((TTL, fh.to_file_attr()))
         } else {
-            for component in path.components() {
-                info!(?path, ?component);
+            match self.lookup(path) {
+                LookupResult::Directory => Ok((TTL, fh.to_file_attr())),
+                LookupResult::Missing => Err(ENOENT),
+                LookupResult::File(source) => match self.libc_wrapper.lstat(source) {
+                    Ok(stat) => Ok((TTL, stat.to_file_attr())),
+                    Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
+                },
             }
-            info!(path = debug(path), "TODO: lookup");
-            Err(ENOENT)
         }
     }
+
     fn opendir(&self, _req: RequestInfo, path: &Path, flags: u32) -> ResultOpen {
         info!(
             path = debug(path),
@@ -190,9 +191,125 @@ impl FilesystemMT for TagFS {
 
         Ok(entries)
     }
+
+    fn open(&self, _req: RequestInfo, path: &Path, flags: u32) -> ResultOpen {
+        info!(?path, flags = format!("{:o}", flags), "open");
+
+        match self.lookup(path) {
+            LookupResult::Directory => Err(ENOENT),
+            LookupResult::File(source) => self
+                .libc_wrapper
+                .open(&PathBuf::from(source), flags as i32)
+                .map(|fh| (fh as u64, flags))
+                .map_err(|e| e.raw_os_error().unwrap_or(ENOENT)),
+            LookupResult::Missing => Err(ENOENT),
+        }
+    }
+
+    fn release(
+        &self,
+        _req: RequestInfo,
+        path: &Path,
+        fh: u64,
+        flags: u32,
+        lock_owner: u64,
+        flush: bool,
+    ) -> fuse_mt::ResultEmpty {
+        info!(
+            ?path,
+            fh,
+            flags = format!("{:o}", flags),
+            lock_owner,
+            flush,
+            "release"
+        );
+        self.libc_wrapper
+            .close(fh as i32)
+            .map_err(|e| e.raw_os_error().unwrap_or(ENOENT))
+    }
+
+    fn read(
+        &self,
+        _req: RequestInfo,
+        path: &Path,
+        fh: u64,
+        offset: u64,
+        size: u32,
+        callback: impl FnOnce(fuse_mt::ResultSlice<'_>) -> fuse_mt::CallbackResult,
+    ) -> fuse_mt::CallbackResult {
+        info!(?path, fh, offset, size, "read");
+
+        match self.libc_wrapper.read(fh as i32, offset as i64, size) {
+            Ok(content) => callback(Ok(content.as_slice())),
+            Err(e) => callback(Err(e.raw_os_error().unwrap_or(ENOENT))),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum LookupResult<'a> {
+    Directory,
+    File(&'a Path),
+    Missing,
+}
+impl<'a> TagFS {
+    #[instrument(skip(self))]
+    fn lookup(&'a self, path: &Path) -> LookupResult<'a> {
+        use LookupResult::*;
+        info!(?path, "lookup");
+
+        if path.components().all(|c| match c {
+            Component::Prefix(_prefix_component) => todo!(),
+            Component::RootDir => true,
+            Component::CurDir => false,
+            Component::ParentDir => false,
+            Component::Normal(tag) => self.contains_tag(tag),
+        }) {
+            debug!(?path, "tag dir");
+            Directory
+        } else {
+            let mut valid_files = None;
+            let empty = PathBuf::new();
+            let empty = empty.as_path();
+
+            for component in path.parent().unwrap_or(empty).components() {
+                info!(?path, ?component);
+                if let Component::Normal(tag) = component {
+                    if let Some(files) = self.get_tag(tag) {
+                        let files = files.1;
+                        if valid_files.is_none() {
+                            valid_files = Some(files.clone());
+                        } else {
+                            valid_files =
+                                Some(valid_files.unwrap().intersection(files).cloned().collect());
+                        }
+                        info!(?tag, ?valid_files, "found");
+                    } else {
+                        info!(?component, "missing");
+                    }
+                }
+            }
+            if let Some(files) = valid_files {
+                let entry = files
+                    .iter()
+                    .flat_map(|idx| self.files.get(*idx))
+                    .filter(|entry| entry.source.file_name() == path.file_name())
+                    .take(1)
+                    .next();
+                match entry {
+                    None => Missing,
+                    Some(e) => File(e.source.as_path()),
+                }
+            } else {
+                info!(path = debug(path), "failed lookup");
+                Missing
+            }
+        }
+    }
 }
 
 impl TagFS {
+    #[instrument(skip_all)]
     fn get_children<'a, 'b, 'c>(
         root: &Path,
         tags: &'a HashMap<Tag, HashSet<usize>>,
@@ -202,6 +319,7 @@ impl TagFS {
         'a: 'c,
         'b: 'c,
     {
+        // TODO Filter out intrinsic tags NOT represented by residual files
         let root_tags = root
             .components()
             .filter_map(|c| match c {
@@ -348,9 +466,9 @@ mod test {
 
     #[traced_test]
     #[test]
-    fn get_children_singleton_child() {
+    fn get_children_singleton_child_file() {
         let mut tags = HashMap::new();
-        tags.insert(Tag::new("singleton", true, "v1"), HashSet::new());
+        tags.insert(Tag::new("singleton", true, "v1"), HashSet::from([0]));
         tags.insert(Tag::new("singleton", true, "v2"), HashSet::new());
         tags.insert(Tag::from("tag1"), HashSet::new());
         let files = vec![Entry {
@@ -364,7 +482,31 @@ mod test {
         )
         .collect::<HashSet<_>>();
         // Inner shows only non-singleton collisions, and related files
+        assert_eq!(2, children.len());
+        assert!(children.contains(&(fuse_mt::FileType::Directory, &OsString::from("tag1"))));
+        assert!(children.contains(&(fuse_mt::FileType::RegularFile, &OsString::from("file1.txt"))));
+    }
+
+    #[traced_test]
+    #[test]
+    fn get_children_singleton_child_nofile() {
+        let mut tags = HashMap::new();
+        tags.insert(Tag::new("singleton", true, "v1"), HashSet::from([0]));
+        tags.insert(Tag::new("singleton", true, "v2"), HashSet::new());
+        tags.insert(Tag::from("tag1"), HashSet::new());
+        let files = vec![Entry {
+            source: PathBuf::from("/fake/dir/where/file/exists/file1.txt"),
+        }];
+
+        let children = TagFS::get_children(
+            &PathBuf::from("/singleton".to_owned() + TAG_SEPARATOR + "v2"),
+            &tags,
+            &files,
+        )
+        .collect::<HashSet<_>>();
+        // Inner shows only non-singleton collisions, and related files
         assert_eq!(1, children.len());
         assert!(children.contains(&(fuse_mt::FileType::Directory, &OsString::from("tag1"))));
+        assert!(!children.contains(&(fuse_mt::FileType::RegularFile, &OsString::from("file1.txt"))));
     }
 }
