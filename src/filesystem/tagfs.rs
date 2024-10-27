@@ -82,7 +82,7 @@ pub struct TagFS<T> {
     files: Vec<Entry>,
     //tags: HashSet<OsString>,
     tags: HashMap<Tag, HashSet<usize>>,
-    libc_wrapper: T,//Box<dyn LibcWrapper + Send + Sync>,
+    libc_wrapper: T, //Box<dyn LibcWrapper + Send + Sync>,
 }
 
 pub fn new() -> TagFS<LibcWrapperReal> {
@@ -90,14 +90,16 @@ pub fn new() -> TagFS<LibcWrapperReal> {
 }
 
 impl<'a, T> TagFS<T>
-where T: LibcWrapper {
+where
+    T: LibcWrapper,
+{
     fn new() -> Self {
         let libc_wrapper = T::new();
         Self {
             files: Vec::new(),
             tags: HashMap::new(),
             libc_wrapper,
-        }    
+        }
     }
 
     pub fn add_file(&mut self, source: &'a Path, tags: HashSet<Tag>) {
@@ -120,8 +122,10 @@ where T: LibcWrapper {
     }
 }
 
-impl <T> FilesystemMT for TagFS<T>
-where T: LibcWrapper {
+impl<T> FilesystemMT for TagFS<T>
+where
+    T: LibcWrapper,
+{
     fn getattr(
         &self,
         _req: fuse_mt::RequestInfo,
@@ -257,11 +261,9 @@ where T: LibcWrapper {
         info!(?parent, ?name, ?path, "unlink");
         match self.lookup(&path) {
             LookupResult::Directory | LookupResult::Missing => Err(ENOENT),
-            LookupResult::File(source) => {
-                match self.libc_wrapper.unlink(source) {
-                    Ok(_) => Ok(()),
-                    Err(e) => Err(e.raw_os_error().unwrap_or(ENOENT)),
-                }
+            LookupResult::File(source) => match self.libc_wrapper.unlink(source) {
+                Ok(_) => Ok(()),
+                Err(e) => Err(e.raw_os_error().unwrap_or(ENOENT)),
             },
         }
     }
@@ -274,7 +276,9 @@ enum LookupResult<'a> {
     Missing,
 }
 impl<'a, T> TagFS<T>
-where T: LibcWrapper {
+where
+    T: LibcWrapper,
+{
     #[instrument(skip(self))]
     fn lookup(&'a self, path: &Path) -> LookupResult<'a> {
         use LookupResult::*;
@@ -330,74 +334,74 @@ where T: LibcWrapper {
     }
 }
 
-    #[instrument(skip_all)]
-    fn get_children<'a, 'b, 'c>(
-        root: &Path,
-        tags: &'a HashMap<Tag, HashSet<usize>>,
-        files: &'b [Entry],
-    ) -> impl Iterator<Item = (FileType, &'c OsStr)>
-    where
-        'a: 'c,
-        'b: 'c,
-    {
-        // TODO Filter out intrinsic tags NOT represented by residual files
-        let root_tags = root
-            .components()
-            .filter_map(|c| match c {
-                Component::Normal(p) => Some(p.to_os_string()),
-                _ => None,
-            })
-            .collect::<HashSet<_>>();
+#[instrument(skip_all)]
+fn get_children<'a, 'b, 'c>(
+    root: &Path,
+    tags: &'a HashMap<Tag, HashSet<usize>>,
+    files: &'b [Entry],
+) -> impl Iterator<Item = (FileType, &'c OsStr)>
+where
+    'a: 'c,
+    'b: 'c,
+{
+    // TODO Filter out intrinsic tags NOT represented by residual files
+    let root_tags = root
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(p) => Some(p.to_os_string()),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
 
-        // Collect ids of files with ALL tags in path
-        let file_ids = if root_tags.is_empty() {
-            HashSet::new()
-        } else {
-            tags.iter()
-                .filter(|(tag, _file_ids)| root_tags.contains(tag.as_os_str()))
-                .map(|(_tag, file_ids)| file_ids)
-                .fold(None, |acc, v| match acc {
-                    None => Some(v.clone()),
-                    Some(a) => Some(a.intersection(v).cloned().collect()),
-                })
-                .unwrap_or_default()
-        };
-
-        debug!(?file_ids, ?root_tags, ?root, "residue");
-
-        // TODO Deal with name collision between 2x tags NOT in root, one intrinsic, one extrinsic
-
-        let mut singleton_labels = HashSet::new();
-        for tag in tags.keys() {
-            debug!(?tag, ?root_tags, "detect singletons");
-            if root_tags.contains(tag.as_os_str()) && tag.is_singleton() {
-                singleton_labels.insert(tag.label());
-            }
-        }
-
+    // Collect ids of files with ALL tags in path
+    let file_ids = if root_tags.is_empty() {
+        HashSet::new()
+    } else {
         tags.iter()
-            // Filter out tags already in path
-            .filter(move |(t, _)| {
-                debug!(?t, ?root_tags, "visited filter tag");
-                !root_tags.contains(t.as_os_str())
+            .filter(|(tag, _file_ids)| root_tags.contains(tag.as_os_str()))
+            .map(|(_tag, file_ids)| file_ids)
+            .fold(None, |acc, v| match acc {
+                None => Some(v.clone()),
+                Some(a) => Some(a.intersection(v).cloned().collect()),
             })
-            // Filter out already seen filter tags
-            .filter(move |(t, _)| {
-                debug!(?t, ?singleton_labels, "singleton filter tag");
-                !t.is_singleton() || !singleton_labels.contains(t.label())
-            })
-            // Remaining tags become directory entries
-            .map(|(t, _)| (FileType::Directory, t.as_os_str()))
-            .chain(
-                // File ids become Regular File entries
-                file_ids
-                    .into_iter()
-                    .filter_map(|file_id| files.get(file_id))
-                    .filter_map(|file| file.source.file_name())
-                    .unique()
-                    .map(|file_name| (FileType::RegularFile, file_name)),
-            )
+            .unwrap_or_default()
+    };
+
+    debug!(?file_ids, ?root_tags, ?root, "residue");
+
+    // TODO Deal with name collision between 2x tags NOT in root, one intrinsic, one extrinsic
+
+    let mut singleton_labels = HashSet::new();
+    for tag in tags.keys() {
+        debug!(?tag, ?root_tags, "detect singletons");
+        if root_tags.contains(tag.as_os_str()) && tag.is_singleton() {
+            singleton_labels.insert(tag.label());
+        }
     }
+
+    tags.iter()
+        // Filter out tags already in path
+        .filter(move |(t, _)| {
+            debug!(?t, ?root_tags, "visited filter tag");
+            !root_tags.contains(t.as_os_str())
+        })
+        // Filter out already seen filter tags
+        .filter(move |(t, _)| {
+            debug!(?t, ?singleton_labels, "singleton filter tag");
+            !t.is_singleton() || !singleton_labels.contains(t.label())
+        })
+        // Remaining tags become directory entries
+        .map(|(t, _)| (FileType::Directory, t.as_os_str()))
+        .chain(
+            // File ids become Regular File entries
+            file_ids
+                .into_iter()
+                .filter_map(|file_id| files.get(file_id))
+                .filter_map(|file| file.source.file_name())
+                .unique()
+                .map(|file_name| (FileType::RegularFile, file_name)),
+        )
+}
 
 #[cfg(test)]
 mod test {
@@ -409,7 +413,10 @@ mod test {
 
     use tracing_test::traced_test;
 
-    use crate::{filesystem::tagfs::get_children, tagger::{Tag, TAG_SEPARATOR}};
+    use crate::{
+        filesystem::tagfs::get_children,
+        tagger::{Tag, TAG_SEPARATOR},
+    };
 
     use super::Entry;
 
