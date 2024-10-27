@@ -78,20 +78,26 @@ struct Entry {
 }
 
 #[derive(Debug)]
-pub struct TagFS {
+pub struct TagFS<T> {
     files: Vec<Entry>,
     //tags: HashSet<OsString>,
     tags: HashMap<Tag, HashSet<usize>>,
-    libc_wrapper: Box<dyn LibcWrapper + Send + Sync>,
+    libc_wrapper: T,//Box<dyn LibcWrapper + Send + Sync>,
 }
 
-impl<'a> TagFS {
-    pub fn new() -> Self {
+pub fn new() -> TagFS<LibcWrapperReal> {
+    TagFS::<LibcWrapperReal>::new()
+}
+
+impl<'a, T> TagFS<T>
+where T: LibcWrapper {
+    fn new() -> Self {
+        let libc_wrapper = T::new();
         Self {
             files: Vec::new(),
             tags: HashMap::new(),
-            libc_wrapper: Box::new(LibcWrapperReal::new()),
-        }
+            libc_wrapper,
+        }    
     }
 
     pub fn add_file(&mut self, source: &'a Path, tags: HashSet<Tag>) {
@@ -114,7 +120,8 @@ impl<'a> TagFS {
     }
 }
 
-impl FilesystemMT for TagFS {
+impl <T> FilesystemMT for TagFS<T>
+where T: LibcWrapper {
     fn getattr(
         &self,
         _req: fuse_mt::RequestInfo,
@@ -181,7 +188,7 @@ impl FilesystemMT for TagFS {
             },
         ];
 
-        for (child_type, child_name) in Self::get_children(path, &self.tags, &self.files) {
+        for (child_type, child_name) in get_children(path, &self.tags, &self.files) {
             info!(?child_type, name = ?child_name, "children");
             entries.push(DirectoryEntry {
                 name: child_name.into(),
@@ -244,6 +251,20 @@ impl FilesystemMT for TagFS {
             Err(e) => callback(Err(e.raw_os_error().unwrap_or(ENOENT))),
         }
     }
+
+    fn unlink(&self, _req: RequestInfo, parent: &Path, name: &OsStr) -> fuse_mt::ResultEmpty {
+        let path: PathBuf = parent.join(name);
+        info!(?parent, ?name, ?path, "unlink");
+        match self.lookup(&path) {
+            LookupResult::Directory | LookupResult::Missing => Err(ENOENT),
+            LookupResult::File(source) => {
+                match self.libc_wrapper.unlink(source) {
+                    Ok(_) => Ok(()),
+                    Err(e) => Err(e.raw_os_error().unwrap_or(ENOENT)),
+                }
+            },
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -252,7 +273,8 @@ enum LookupResult<'a> {
     File(&'a Path),
     Missing,
 }
-impl<'a> TagFS {
+impl<'a, T> TagFS<T>
+where T: LibcWrapper {
     #[instrument(skip(self))]
     fn lookup(&'a self, path: &Path) -> LookupResult<'a> {
         use LookupResult::*;
@@ -308,7 +330,6 @@ impl<'a> TagFS {
     }
 }
 
-impl TagFS {
     #[instrument(skip_all)]
     fn get_children<'a, 'b, 'c>(
         root: &Path,
@@ -377,7 +398,6 @@ impl TagFS {
                     .map(|file_name| (FileType::RegularFile, file_name)),
             )
     }
-}
 
 #[cfg(test)]
 mod test {
@@ -389,9 +409,9 @@ mod test {
 
     use tracing_test::traced_test;
 
-    use crate::tagger::{Tag, TAG_SEPARATOR};
+    use crate::{filesystem::tagfs::get_children, tagger::{Tag, TAG_SEPARATOR}};
 
-    use super::{Entry, TagFS};
+    use super::Entry;
 
     #[traced_test]
     #[test]
@@ -404,7 +424,7 @@ mod test {
             source: PathBuf::from("/fake/dir/where/file/exists/file1.txt"),
         }];
 
-        let children = TagFS::get_children(&PathBuf::from("/"), &tags, &files);
+        let children = get_children(&PathBuf::from("/"), &tags, &files);
         assert_eq!(3, children.count());
     }
 
@@ -419,7 +439,7 @@ mod test {
             source: PathBuf::from("/fake/dir/where/file/exists/file1.txt"),
         }];
 
-        let children = TagFS::get_children(&PathBuf::from("/tag2"), &tags, &files);
+        let children = get_children(&PathBuf::from("/tag2"), &tags, &files);
         assert_eq!(2, children.count());
     }
 
@@ -434,7 +454,7 @@ mod test {
             source: PathBuf::from("/fake/dir/where/file/exists/file1.txt"),
         }];
 
-        let children = TagFS::get_children(&PathBuf::from("/tag2/tag1"), &tags, &files);
+        let children = get_children(&PathBuf::from("/tag2/tag1"), &tags, &files);
         assert_eq!(1, children.count());
     }
 
@@ -449,8 +469,7 @@ mod test {
             source: PathBuf::from("/fake/dir/where/file/exists/file1.txt"),
         }];
 
-        let children =
-            TagFS::get_children(&PathBuf::from("/"), &tags, &files).collect::<HashSet<_>>();
+        let children = get_children(&PathBuf::from("/"), &tags, &files).collect::<HashSet<_>>();
         // Root shows all tags, no files
         assert_eq!(3, children.len());
         assert!(children.contains(&(
@@ -475,7 +494,7 @@ mod test {
             source: PathBuf::from("/fake/dir/where/file/exists/file1.txt"),
         }];
 
-        let children = TagFS::get_children(
+        let children = get_children(
             &PathBuf::from("/singleton".to_owned() + TAG_SEPARATOR + "v1"),
             &tags,
             &files,
@@ -498,7 +517,7 @@ mod test {
             source: PathBuf::from("/fake/dir/where/file/exists/file1.txt"),
         }];
 
-        let children = TagFS::get_children(
+        let children = get_children(
             &PathBuf::from("/singleton".to_owned() + TAG_SEPARATOR + "v2"),
             &tags,
             &files,

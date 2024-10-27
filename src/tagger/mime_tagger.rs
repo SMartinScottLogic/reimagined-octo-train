@@ -49,16 +49,18 @@ impl<T: MimeExtractor + std::fmt::Debug> Tagger for MimeTagger<T> {
 #[cfg(test)]
 mod test {
     use std::{
+        collections::HashSet,
         ffi::OsString,
         path::{Path, PathBuf},
     };
 
     use anyhow::Context;
 
+    use magic::{cookie::Load, Cookie};
     use tracing::debug;
     use tracing_test::traced_test;
 
-    use crate::tagger::{Tagger as _, TAG_SEPARATOR};
+    use crate::tagger::{Tag, Tagger as _, TAG_SEPARATOR};
 
     use super::{MimeExtractor, MimeTagger};
 
@@ -102,5 +104,15 @@ mod test {
             debug!(?e);
             e == super::Error::Illegible
         }));
+    }
+
+    #[traced_test]
+    #[test]
+    fn mime_extraction_real() {
+        let t = MimeTagger::<Cookie<Load>>::new();
+        let t = t.tag(&PathBuf::from("./src/main.rs"));
+        assert!(t.is_ok());
+        let t = t.unwrap();
+        assert_eq!(t, HashSet::from([Tag::new("mime", true, "text|x-c")]));
     }
 }

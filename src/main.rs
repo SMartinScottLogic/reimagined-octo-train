@@ -1,6 +1,6 @@
 use anyhow::{Context as _, Result};
 use clap::Parser;
-use filesystem::TagFS;
+use filesystem::tagfs;
 use magic::{cookie::Load, Cookie};
 use std::collections::HashSet;
 use std::env;
@@ -77,7 +77,7 @@ fn main() -> Result<()> {
     setup_logger();
     let args = Args::parse();
 
-    let mut target_fs = TagFS::new();
+    let mut target_fs = tagfs::new();
     let mut file_updater = FileUpdater::new();
     file_updater.add_tagger(MimeTagger::<Cookie<Load>>::new());
     file_updater.add_tagger(MetadataTagger::new());

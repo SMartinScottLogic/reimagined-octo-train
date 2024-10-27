@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use std::{
     ffi::CString,
     io,
@@ -28,6 +29,7 @@ pub(crate) fn mode_to_filetype(mode: libc::mode_t) -> FileType {
 
 #[automock]
 pub trait LibcWrapper: std::fmt::Debug {
+    fn new() -> Self;
     fn statfs(&self, path: PathBuf) -> io::Result<libc::statfs>;
     fn fstat(&self, fh: u64) -> io::Result<libc::stat>;
     fn lstat(&self, path: &Path) -> io::Result<libc::stat>;
@@ -39,12 +41,10 @@ pub trait LibcWrapper: std::fmt::Debug {
 
 #[derive(Debug)]
 pub struct LibcWrapperReal;
-impl LibcWrapperReal {
-    pub fn new() -> Self {
-        Self {}
-    }
-}
 impl LibcWrapper for LibcWrapperReal {
+    fn new() -> Self {
+        Self
+    }
     fn statfs(&self, path: PathBuf) -> io::Result<libc::statfs> {
         let mut stat = MaybeUninit::<libc::statfs>::zeroed();
 
