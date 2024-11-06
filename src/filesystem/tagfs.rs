@@ -409,16 +409,25 @@ mod test {
         collections::{HashMap, HashSet},
         ffi::OsString,
         path::PathBuf,
+        sync::Mutex,
     };
 
+    use fuse_mt::{FilesystemMT as _, RequestInfo};
+    use libc::{ENOENT, EPERM};
     use tracing_test::traced_test;
 
     use crate::{
-        filesystem::tagfs::get_children,
+        filesystem::{
+            libc_wrappers::MockLibcWrapper,
+            tagfs::{get_children, TagFS},
+        },
         tagger::{Tag, TAG_SEPARATOR},
     };
 
     use super::Entry;
+
+    // Mutex to ensure only one test at a time is accessing the global context for construction
+    static MTX: Mutex<()> = Mutex::new(());
 
     #[traced_test]
     #[test]
@@ -534,5 +543,105 @@ mod test {
         assert_eq!(1, children.len());
         assert!(children.contains(&(fuse_mt::FileType::Directory, &OsString::from("tag1"))));
         assert!(!children.contains(&(fuse_mt::FileType::RegularFile, &OsString::from("file1.txt"))));
+    }
+
+    #[traced_test]
+    #[test]
+    fn unlink_present_file() {
+        let _m = MTX.lock();
+
+        let ctx = MockLibcWrapper::new_context();
+        ctx.expect().returning(|| {
+            let mut mock = MockLibcWrapper::default();
+            mock.expect_unlink().times(1).returning(|_path| Ok(()));
+            mock
+        });
+        let mut fs = TagFS::<MockLibcWrapper>::new();
+        let mut tags = HashSet::new();
+        tags.insert(Tag::from("tag"));
+        fs.add_file(&PathBuf::from("/fake/source/present.txt"), tags);
+        let r = fs.unlink(
+            RequestInfo {
+                unique: 0,
+                uid: 0,
+                gid: 0,
+                pid: 0,
+            },
+            &PathBuf::from("/tag"),
+            &OsString::from("present.txt"),
+        );
+        assert!(r.is_ok());
+    }
+
+    #[traced_test]
+    #[test]
+    fn unlink_missing_file() {
+        let _m = MTX.lock();
+
+        let ctx = MockLibcWrapper::new_context();
+        ctx.expect().returning(MockLibcWrapper::default);
+        let mut fs = TagFS::<MockLibcWrapper>::new();
+        let mut tags = HashSet::new();
+        tags.insert(Tag::from("tag"));
+        fs.add_file(&PathBuf::from("/fake/source/present.txt"), tags);
+        let r = fs.unlink(
+            RequestInfo {
+                unique: 0,
+                uid: 0,
+                gid: 0,
+                pid: 0,
+            },
+            &PathBuf::from("/tag"),
+            &OsString::from("missing.txt"),
+        );
+        assert!(r.is_err());
+        assert_eq!(ENOENT, r.unwrap_err());
+    }
+
+    #[traced_test]
+    #[test]
+    fn unlink_forbidden_file() {
+        let _m = MTX.lock();
+
+        let ctx = MockLibcWrapper::new_context();
+        ctx.expect().returning(|| {
+            let mut mock = MockLibcWrapper::default();
+            mock.expect_unlink().times(1).returning(|path| {
+                if path == PathBuf::from("/fake/source/present.txt") {
+                    Err(std::io::Error::from_raw_os_error(EPERM))
+                } else {
+                    Err(std::io::Error::from_raw_os_error(ENOENT))
+                }
+            });
+            mock
+        });
+        let mut fs = TagFS::<MockLibcWrapper>::new();
+        let mut tags = HashSet::new();
+        tags.insert(Tag::from("tag"));
+        fs.add_file(&PathBuf::from("/fake/source/present.txt"), tags);
+        let r = fs.unlink(
+            RequestInfo {
+                unique: 0,
+                uid: 0,
+                gid: 0,
+                pid: 0,
+            },
+            &PathBuf::from("/tag"),
+            &OsString::from("present.txt"),
+        );
+        assert!(r.is_err());
+        assert_eq!(EPERM, r.unwrap_err());
+        let r = fs.unlink(
+            RequestInfo {
+                unique: 0,
+                uid: 0,
+                gid: 0,
+                pid: 0,
+            },
+            &PathBuf::from("/tag"),
+            &OsString::from("missing.txt"),
+        );
+        assert!(r.is_err());
+        assert_eq!(ENOENT, r.unwrap_err());
     }
 }
