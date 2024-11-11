@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     ffi::OsStr,
     path::{Component, Path, PathBuf},
+    sync::Mutex,
     time::{Duration, SystemTime},
 };
 
@@ -77,10 +78,26 @@ struct Entry {
     source: PathBuf,
 }
 
+impl From<&str> for Entry {
+    fn from(value: &str) -> Self {
+        Self {
+            source: PathBuf::from(value),
+        }
+    }
+}
+
+impl From<&Path> for Entry {
+    fn from(value: &Path) -> Self {
+        Self {
+            source: value.to_path_buf(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct TagFS<T> {
     files: Vec<Entry>,
-    //tags: HashSet<OsString>,
+    deleted: Mutex<HashSet<usize>>,
     tags: HashMap<Tag, HashSet<usize>>,
     libc_wrapper: T, //Box<dyn LibcWrapper + Send + Sync>,
 }
@@ -97,6 +114,7 @@ where
         let libc_wrapper = T::new();
         Self {
             files: Vec::new(),
+            deleted: Mutex::new(HashSet::new()),
             tags: HashMap::new(),
             libc_wrapper,
         }
@@ -104,13 +122,22 @@ where
 
     pub fn add_file(&mut self, source: &'a Path, tags: HashSet<Tag>) {
         info!(file = ?source, ?tags, "add_file");
-        self.files.push(Entry {
-            source: source.to_path_buf(),
-        });
+        self.files.push(Entry::from(source));
         let file_id = self.files.len() - 1;
         for tag in tags {
             self.tags.entry(tag).or_default().insert(file_id);
         }
+    }
+
+    pub fn is_deleted(&self, file_id: usize) -> bool {
+        let deleted = self.deleted.lock().unwrap();
+        deleted.contains(&file_id)
+    }
+
+    pub fn delete_file(&self, file_id: usize) {
+        //self.files.get_mut(file_id).unwrap().deleted = true;
+        let mut deleted = self.deleted.lock().unwrap();
+        deleted.insert(file_id);
     }
 
     fn contains_tag(&self, tag: &OsStr) -> bool {
@@ -143,7 +170,7 @@ where
             match self.lookup(path) {
                 LookupResult::Directory => Ok((TTL, fh.to_file_attr())),
                 LookupResult::Missing => Err(ENOENT),
-                LookupResult::File(source) => match self.libc_wrapper.lstat(source) {
+                LookupResult::File(e, ..) => match self.libc_wrapper.lstat(&e.source) {
                     Ok(stat) => Ok((TTL, stat.to_file_attr())),
                     Err(e) => Err(e.raw_os_error().unwrap_or(libc::ENOENT)),
                 },
@@ -192,7 +219,9 @@ where
             },
         ];
 
-        for (child_type, child_name) in get_children(path, &self.tags, &self.files) {
+        for (child_type, child_name) in get_children(path, &self.tags, &self.files, |file_id| {
+            self.is_deleted(file_id)
+        }) {
             info!(?child_type, name = ?child_name, "children");
             entries.push(DirectoryEntry {
                 name: child_name.into(),
@@ -208,9 +237,9 @@ where
 
         match self.lookup(path) {
             LookupResult::Directory => Err(ENOENT),
-            LookupResult::File(source) => self
+            LookupResult::File(e, ..) => self
                 .libc_wrapper
-                .open(&PathBuf::from(source), flags as i32)
+                .open(&e.source, flags as i32)
                 .map(|fh| (fh as u64, flags))
                 .map_err(|e| e.raw_os_error().unwrap_or(ENOENT)),
             LookupResult::Missing => Err(ENOENT),
@@ -259,10 +288,14 @@ where
     fn unlink(&self, _req: RequestInfo, parent: &Path, name: &OsStr) -> fuse_mt::ResultEmpty {
         let path: PathBuf = parent.join(name);
         info!(?parent, ?name, ?path, "unlink");
+        // TODO Mark self.files entry as deleted, if unlink successfully
         match self.lookup(&path) {
             LookupResult::Directory | LookupResult::Missing => Err(ENOENT),
-            LookupResult::File(source) => match self.libc_wrapper.unlink(source) {
-                Ok(_) => Ok(()),
+            LookupResult::File(e, i) => match self.libc_wrapper.unlink(&e.source) {
+                Ok(_) => {
+                    self.delete_file(i);
+                    Ok(())
+                }
                 Err(e) => Err(e.raw_os_error().unwrap_or(ENOENT)),
             },
         }
@@ -272,7 +305,7 @@ where
 #[derive(Debug)]
 enum LookupResult<'a> {
     Directory,
-    File(&'a Path),
+    File(&'a Entry, usize),
     Missing,
 }
 impl<'a, T> TagFS<T>
@@ -283,6 +316,8 @@ where
     fn lookup(&'a self, path: &Path) -> LookupResult<'a> {
         use LookupResult::*;
         info!(?path, "lookup");
+
+        // TODO Skip deleted files
 
         if path.components().all(|c| match c {
             Component::Prefix(_prefix_component) => todo!(),
@@ -318,13 +353,13 @@ where
             if let Some(files) = valid_files {
                 let entry = files
                     .iter()
-                    .flat_map(|idx| self.files.get(*idx))
-                    .filter(|entry| entry.source.file_name() == path.file_name())
+                    .flat_map(|idx| self.files.get(*idx).map(|e| (*idx, e)))
+                    .filter(|(_idx, entry)| entry.source.file_name() == path.file_name())
                     .take(1)
                     .next();
                 match entry {
                     None => Missing,
-                    Some(e) => File(e.source.as_path()),
+                    Some((idx, e)) => File(e, idx),
                 }
             } else {
                 info!(path = debug(path), "failed lookup");
@@ -335,16 +370,20 @@ where
 }
 
 #[instrument(skip_all)]
-fn get_children<'a, 'b, 'c>(
+fn get_children<'a, 'b, 'c, F>(
     root: &Path,
     tags: &'a HashMap<Tag, HashSet<usize>>,
     files: &'b [Entry],
+    is_deleted: F,
 ) -> impl Iterator<Item = (FileType, &'c OsStr)>
 where
     'a: 'c,
     'b: 'c,
+    F: Fn(usize) -> bool + 'c,
 {
     // TODO Filter out intrinsic tags NOT represented by residual files
+    // TODO Skip deleted files
+
     let root_tags = root
         .components()
         .filter_map(|c| match c {
@@ -396,6 +435,7 @@ where
             // File ids become Regular File entries
             file_ids
                 .into_iter()
+                .filter(move |file_id| !is_deleted(*file_id))
                 .filter_map(|file_id| files.get(file_id))
                 .filter_map(|file| file.source.file_name())
                 .unique()
@@ -436,11 +476,9 @@ mod test {
         tags.insert(Tag::from("tag1"), HashSet::new());
         tags.insert(Tag::from("tag2"), HashSet::new());
         tags.insert(Tag::from("tag3"), HashSet::new());
-        let files = vec![Entry {
-            source: PathBuf::from("/fake/dir/where/file/exists/file1.txt"),
-        }];
+        let files = vec![Entry::from("/fake/dir/where/file/exists/file1.txt")];
 
-        let children = get_children(&PathBuf::from("/"), &tags, &files);
+        let children = get_children(&PathBuf::from("/"), &tags, &files, |_| false);
         assert_eq!(3, children.count());
     }
 
@@ -451,11 +489,9 @@ mod test {
         tags.insert(Tag::from("tag1"), HashSet::new());
         tags.insert(Tag::from("tag2"), HashSet::new());
         tags.insert(Tag::from("tag3"), HashSet::new());
-        let files = vec![Entry {
-            source: PathBuf::from("/fake/dir/where/file/exists/file1.txt"),
-        }];
+        let files = vec![Entry::from("/fake/dir/where/file/exists/file1.txt")];
 
-        let children = get_children(&PathBuf::from("/tag2"), &tags, &files);
+        let children = get_children(&PathBuf::from("/tag2"), &tags, &files, |_| false);
         assert_eq!(2, children.count());
     }
 
@@ -466,11 +502,9 @@ mod test {
         tags.insert(Tag::from("tag1"), HashSet::new());
         tags.insert(Tag::from("tag2"), HashSet::new());
         tags.insert(Tag::from("tag3"), HashSet::new());
-        let files = vec![Entry {
-            source: PathBuf::from("/fake/dir/where/file/exists/file1.txt"),
-        }];
+        let files = vec![Entry::from("/fake/dir/where/file/exists/file1.txt")];
 
-        let children = get_children(&PathBuf::from("/tag2/tag1"), &tags, &files);
+        let children = get_children(&PathBuf::from("/tag2/tag1"), &tags, &files, |_| false);
         assert_eq!(1, children.count());
     }
 
@@ -481,11 +515,10 @@ mod test {
         tags.insert(Tag::new("singleton", true, "v1"), HashSet::new());
         tags.insert(Tag::new("singleton", true, "v2"), HashSet::new());
         tags.insert(Tag::from("tag1"), HashSet::new());
-        let files = vec![Entry {
-            source: PathBuf::from("/fake/dir/where/file/exists/file1.txt"),
-        }];
+        let files = vec![Entry::from("/fake/dir/where/file/exists/file1.txt")];
 
-        let children = get_children(&PathBuf::from("/"), &tags, &files).collect::<HashSet<_>>();
+        let children =
+            get_children(&PathBuf::from("/"), &tags, &files, |_| false).collect::<HashSet<_>>();
         // Root shows all tags, no files
         assert_eq!(3, children.len());
         assert!(children.contains(&(
@@ -506,14 +539,13 @@ mod test {
         tags.insert(Tag::new("singleton", true, "v1"), HashSet::from([0]));
         tags.insert(Tag::new("singleton", true, "v2"), HashSet::new());
         tags.insert(Tag::from("tag1"), HashSet::new());
-        let files = vec![Entry {
-            source: PathBuf::from("/fake/dir/where/file/exists/file1.txt"),
-        }];
+        let files = vec![Entry::from("/fake/dir/where/file/exists/file1.txt")];
 
         let children = get_children(
             &PathBuf::from("/singleton".to_owned() + TAG_SEPARATOR + "v1"),
             &tags,
             &files,
+            |_| false,
         )
         .collect::<HashSet<_>>();
         // Inner shows only non-singleton collisions, and related files
@@ -524,19 +556,39 @@ mod test {
 
     #[traced_test]
     #[test]
+    fn get_children_singleton_child_file_deleted() {
+        let mut tags = HashMap::new();
+        tags.insert(Tag::new("singleton", true, "v1"), HashSet::from([0]));
+        tags.insert(Tag::new("singleton", true, "v2"), HashSet::new());
+        tags.insert(Tag::from("tag1"), HashSet::new());
+        let files = vec![Entry::from("/fake/dir/where/file/exists/file1.txt")];
+
+        let children = get_children(
+            &PathBuf::from("/singleton".to_owned() + TAG_SEPARATOR + "v1"),
+            &tags,
+            &files,
+            |file_id| file_id == 0,
+        )
+        .collect::<HashSet<_>>();
+        // Inner shows only non-singleton collisions, and related files
+        assert_eq!(1, children.len());
+        assert!(children.contains(&(fuse_mt::FileType::Directory, &OsString::from("tag1"))));
+    }
+
+    #[traced_test]
+    #[test]
     fn get_children_singleton_child_nofile() {
         let mut tags = HashMap::new();
         tags.insert(Tag::new("singleton", true, "v1"), HashSet::from([0]));
         tags.insert(Tag::new("singleton", true, "v2"), HashSet::new());
         tags.insert(Tag::from("tag1"), HashSet::new());
-        let files = vec![Entry {
-            source: PathBuf::from("/fake/dir/where/file/exists/file1.txt"),
-        }];
+        let files = vec![Entry::from("/fake/dir/where/file/exists/file1.txt")];
 
         let children = get_children(
             &PathBuf::from("/singleton".to_owned() + TAG_SEPARATOR + "v2"),
             &tags,
             &files,
+            |_| false,
         )
         .collect::<HashSet<_>>();
         // Inner shows only non-singleton collisions, and related files
@@ -571,6 +623,7 @@ mod test {
             &OsString::from("present.txt"),
         );
         assert!(r.is_ok());
+        assert!(fs.is_deleted(0));
     }
 
     #[traced_test]
@@ -596,6 +649,7 @@ mod test {
         );
         assert!(r.is_err());
         assert_eq!(ENOENT, r.unwrap_err());
+        assert!(!fs.is_deleted(0));
     }
 
     #[traced_test]
@@ -631,6 +685,7 @@ mod test {
         );
         assert!(r.is_err());
         assert_eq!(EPERM, r.unwrap_err());
+        assert!(!fs.is_deleted(0));
         let r = fs.unlink(
             RequestInfo {
                 unique: 0,
